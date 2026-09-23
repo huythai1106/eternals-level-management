@@ -1,0 +1,18 @@
+{
+  "name": "com.eternals.level-management",
+  "displayName": "Eternals Level Management",
+  "version": "1.2.0",
+  "unity": "6000.0",
+  "description": "Reusable level flow contracts, Addressables discovery, local fallback support, and editor utilities for creating remote level copies.",
+  "dependencies": {
+    "com.unity.addressables": "1.22.3"
+  },
+  "keywords": [
+    "level",
+    "addressables",
+    "content-update"
+  ],
+  "author": {
+    "name": "Eternals"
+  }
+}
