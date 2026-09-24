@@ -183,6 +183,8 @@ namespace Eternals.LevelManagement.Addressables
         private Action<TLevel, int> levelLoaded;
         private Action<string> loadFailed;
         private int pendingLevelIndex;
+        private string pendingPreferredOption = LevelDataManagerSettingsBase.MainLevelOption;
+        private string pendingSourceOption = LevelDataManagerSettingsBase.MainLevelOption;
         private bool isDisposed;
 
         public AddressableLevelLoader(LevelDataManagerBase<TLevel> levelDataManager)
@@ -205,6 +207,7 @@ namespace Eternals.LevelManagement.Addressables
                 return false;
             }
 
+            levelDataManager.PrepareLevelOptionForLoad();
             return levelDataManager.InitializeAddressableLevels(completed);
         }
 
@@ -224,20 +227,34 @@ namespace Eternals.LevelManagement.Addressables
             }
 
             CancelPendingLoad();
+            string preferredOption = levelDataManager.PrepareLevelOptionForLoad();
 
             if (!levelDataManager.UseAddressables)
-                return LoadLocalLevel(requestedIndex, onLevelLoaded, onLoadFailed, null);
-
-            if (!levelDataManager.TryLoadAddressableLevelAsync(requestedIndex, out pendingHandle))
             {
                 return LoadLocalLevel(
                     requestedIndex,
+                    preferredOption,
+                    onLevelLoaded,
+                    onLoadFailed,
+                    null);
+            }
+
+            if (!levelDataManager.TryLoadAddressableLevelAsync(
+                    requestedIndex,
+                    preferredOption,
+                    out pendingHandle,
+                    out pendingSourceOption))
+            {
+                return LoadLocalLevel(
+                    requestedIndex,
+                    preferredOption,
                     onLevelLoaded,
                     onLoadFailed,
                     "no valid Addressables location or reference was found");
             }
 
             pendingLevelIndex = requestedIndex;
+            pendingPreferredOption = preferredOption;
             levelLoaded = onLevelLoaded;
             loadFailed = onLoadFailed;
             pendingHandle.Completed += OnRemoteLevelLoaded;
@@ -255,6 +272,8 @@ namespace Eternals.LevelManagement.Addressables
 
             levelLoaded = null;
             loadFailed = null;
+            pendingPreferredOption = LevelDataManagerSettingsBase.MainLevelOption;
+            pendingSourceOption = LevelDataManagerSettingsBase.MainLevelOption;
         }
 
         public void ReleaseActiveAsset()
@@ -303,12 +322,27 @@ namespace Eternals.LevelManagement.Addressables
                     ? handle.OperationException.Message
                     : "Addressables returned an empty level asset";
                 UnityEngine.AddressableAssets.Addressables.Release(handle);
-                LoadLocalLevel(requestedIndex, onLoaded, onFailed, reason);
+
+                if (!string.Equals(
+                        pendingSourceOption,
+                        LevelDataManagerSettingsBase.MainLevelOption,
+                        StringComparison.OrdinalIgnoreCase) &&
+                    levelDataManager.TryLoadMainAddressableLevelAsync(requestedIndex, out pendingHandle))
+                {
+                    pendingSourceOption = LevelDataManagerSettingsBase.MainLevelOption;
+                    levelLoaded = onLoaded;
+                    loadFailed = onFailed;
+                    pendingHandle.Completed += OnRemoteLevelLoaded;
+                    return;
+                }
+
+                LoadLocalLevel(requestedIndex, pendingPreferredOption, onLoaded, onFailed, reason);
                 return;
             }
 
             AsyncOperationHandle<TLevel> previousHandle = activeHandle;
             activeHandle = handle;
+            levelDataManager.RecordLevelLoadSource(true, pendingSourceOption);
             onLoaded?.Invoke(handle.Result, requestedIndex);
             if (previousHandle.IsValid())
                 UnityEngine.AddressableAssets.Addressables.Release(previousHandle);
@@ -316,13 +350,16 @@ namespace Eternals.LevelManagement.Addressables
 
         private bool LoadLocalLevel(
             int requestedIndex,
+            string preferredOption,
             Action<TLevel, int> onLoaded,
             Action<string> onFailed,
             string remoteFailure)
         {
             TLevel localLevel = levelDataManager.GetLocalFallbackLevelData(
                 requestedIndex,
-                out int localIndex);
+                preferredOption,
+                out int localIndex,
+                out string sourceOption);
 
             if (localLevel == null)
             {
@@ -342,6 +379,7 @@ namespace Eternals.LevelManagement.Addressables
                     levelDataManager);
             }
 
+            levelDataManager.RecordLevelLoadSource(false, sourceOption);
             onLoaded?.Invoke(localLevel, requestedIndex);
             ReleaseActiveAsset();
             return true;

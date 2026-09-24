@@ -190,7 +190,7 @@ namespace Eternals.LevelManagement.Editor
 
     /// <summary>
     /// Shared Inspector and catalog authoring controls for game-specific level managers.
-    /// The game editor only needs to call DrawLevelManagerControls from its custom Inspector.
+    /// The package editor draws the shared settings and catalog authoring controls.
     /// </summary>
     [InitializeOnLoad]
     public static class LevelDataManagerEditorUtility
@@ -202,8 +202,7 @@ namespace Eternals.LevelManagement.Editor
             Undo.undoRedoEvent += OnUndoRedo;
         }
 
-        public static void DrawLevelManagerControls<TLevel>(LevelDataManagerBase<TLevel> manager)
-            where TLevel : UnityEngine.Object
+        public static void DrawLevelManagerControls(LevelDataManagerSettingsBase manager)
         {
             if (manager == null)
                 return;
@@ -223,7 +222,7 @@ namespace Eternals.LevelManagement.Editor
             }
 
             AddressableAssetGroup targetGroup = DrawRemoteGroup(manager, settings);
-            List<TLevel> localLevels = GetLocalLevels(manager);
+            List<UnityEngine.Object> localLevels = GetLocalLevels(manager);
             List<string> remoteGuids = CollectRemoteLevelGuids(manager);
             AddressableLevelRegistrationUtility.GetCounts(settings, remoteGuids, manager.AddressableLabel,
                 out int registeredCount, out int labelledCount);
@@ -231,13 +230,23 @@ namespace Eternals.LevelManagement.Editor
             EditorGUILayout.HelpBox(
                 $"Local levels: {manager.LocalLevelCount}. Remote copies: {remoteGuids.Count}. " +
                 $"{registeredCount}/{remoteGuids.Count} registered, {labelledCount}/{remoteGuids.Count} labelled '{manager.AddressableLabel}'.\n" +
+                $"Configured A/B options: {manager.LevelOptions.Count}.\n" +
                 $"Local folder: {manager.LevelsFolder}\nRemote copy folder: {manager.AddressableLevelsFolder}\n" +
                 "Local levels remain in the player build as the offline fallback.",
                 MessageType.Info);
 
+            if (manager.UseAddressables && manager.LevelOptions.Count > 0 && !manager.DiscoverAddressablesAtRuntime)
+            {
+                EditorGUILayout.HelpBox(
+                    "A/B option Addressables are discovered by label at runtime. Enable 'Discover Addressables At Runtime' " +
+                    "to use remote option level sets; local option fallback remains available either way.",
+                    MessageType.Warning);
+            }
+
             DrawUpdateLocalLevels(manager);
             using (new EditorGUI.DisabledScope(
-                       EditorApplication.isPlayingOrWillChangePlaymode || localLevels.Count == 0))
+                       EditorApplication.isPlayingOrWillChangePlaymode ||
+                       (localLevels.Count == 0 && manager.LevelOptions.Count == 0)))
             {
                 if (GUILayout.Button("Create / Sync Remote Addressable Copies", GUILayout.Height(30f)))
                     CreateOrSyncRemoteCopies(manager, settings, targetGroup, localLevels);
@@ -262,8 +271,7 @@ namespace Eternals.LevelManagement.Editor
             }
         }
 
-        private static void DrawCommonSettings<TLevel>(LevelDataManagerBase<TLevel> manager)
-            where TLevel : UnityEngine.Object
+        private static void DrawCommonSettings(LevelDataManagerSettingsBase manager)
         {
             string localFolder = EditorGUILayout.TextField("Local Level Folder", manager.LevelsFolder);
             if (!string.Equals(localFolder, manager.LevelsFolder, StringComparison.Ordinal))
@@ -281,10 +289,9 @@ namespace Eternals.LevelManagement.Editor
                 RecordAndDirty(manager, "Change Maximum Level Count", () => manager.SetMaxLevel(maxLevel));
         }
 
-        private static AddressableAssetGroup DrawRemoteGroup<TLevel>(
-            LevelDataManagerBase<TLevel> manager,
+        private static AddressableAssetGroup DrawRemoteGroup(
+            LevelDataManagerSettingsBase manager,
             AddressableAssetSettings settings)
-            where TLevel : UnityEngine.Object
         {
             var groups = new List<AddressableAssetGroup>();
             var labels = new List<string>();
@@ -330,8 +337,7 @@ namespace Eternals.LevelManagement.Editor
             return groups[selectedIndex];
         }
 
-        private static void DrawUpdateLocalLevels<TLevel>(LevelDataManagerBase<TLevel> manager)
-            where TLevel : UnityEngine.Object
+        private static void DrawUpdateLocalLevels(LevelDataManagerSettingsBase manager)
         {
             using (new EditorGUI.DisabledScope(EditorApplication.isPlayingOrWillChangePlaymode))
             {
@@ -348,91 +354,290 @@ namespace Eternals.LevelManagement.Editor
                     return;
                 }
 
-                string filter = "t:" + typeof(TLevel).Name;
-                string[] guids = AssetDatabase.FindAssets(filter, new[] { folder });
-                var paths = new List<string>(guids.Length);
-                for (int i = 0; i < guids.Length; i++)
+                var optionLevels = new List<List<UnityEngine.Object>>(manager.LevelOptions.Count);
+                var seenLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(manager.AddressableLabel))
+                    seenLabels.Add(manager.AddressableLabel.Trim());
+                for (int optionIndex = 0; optionIndex < manager.LevelOptions.Count; optionIndex++)
                 {
-                    string path = AssetDatabase.GUIDToAssetPath(guids[i]);
-                    if (!string.IsNullOrEmpty(path))
-                        paths.Add(path);
-                }
-                paths.Sort(StringComparer.OrdinalIgnoreCase);
+                    LevelDataOption option = manager.LevelOptions[optionIndex];
+                    if (string.IsNullOrWhiteSpace(option.label) ||
+                        string.Equals(option.label.Trim(), LevelDataManagerSettingsBase.MainLevelOption, StringComparison.OrdinalIgnoreCase) ||
+                        !seenLabels.Add(option.label.Trim()))
+                    {
+                        EditorUtility.DisplayDialog(
+                            "Invalid level option",
+                            $"Option {optionIndex + 1} must have a unique non-empty label different from the main Addressables label and 'main'.",
+                            "OK");
+                        return;
+                    }
 
-                int count = manager.MaxLevel < 0 ? paths.Count : Mathf.Min(manager.MaxLevel, paths.Count);
-                var foundLevels = new List<TLevel>(count);
-                for (int i = 0; i < count; i++)
+                    string optionFolder = NormalizeFolder(option.localFolderPath);
+                    if (!AssetDatabase.IsValidFolder(optionFolder))
+                    {
+                        EditorUtility.DisplayDialog(
+                            "Invalid option level folder",
+                            $"Option '{option.label}' points to invalid folder '{optionFolder}'.",
+                            "OK");
+                        return;
+                    }
+
+                    if (!TryFindLevels(manager, optionFolder, out List<UnityEngine.Object> foundOptionLevels, out string error))
+                    {
+                        EditorUtility.DisplayDialog("Could not read option levels", error, "OK");
+                        return;
+                    }
+
+                    optionLevels.Add(foundOptionLevels);
+                }
+
+                if (!TryFindLevels(manager, folder, out List<UnityEngine.Object> foundLevels, out string mainError))
                 {
-                    TLevel level = AssetDatabase.LoadAssetAtPath<TLevel>(paths[i]);
-                    if (level != null)
-                        foundLevels.Add(level);
+                    EditorUtility.DisplayDialog("Could not read local levels", mainError, "OK");
+                    return;
                 }
 
                 Undo.RecordObject(manager, UndoPrefix + "Update Local Level List");
                 manager.SetLevelFolderPath(folder);
-                manager.SetLocalLevels(foundLevels);
+                manager.SetLocalLevelObjects(foundLevels);
+                for (int i = 0; i < manager.LevelOptions.Count; i++)
+                    manager.SetLocalOptionLevelObjects(manager.LevelOptions[i].label, optionLevels[i]);
                 EditorUtility.SetDirty(manager);
                 AssetDatabase.SaveAssets();
                 Debug.Log(
-                    $"{manager.GetType().Name}: updated {foundLevels.Count} local level(s) from '{folder}'.",
+                    $"{manager.GetType().Name}: updated {foundLevels.Count} main level(s) and " +
+                    $"{optionLevels.Count} option level set(s).",
                     manager);
             }
         }
 
-        private static void CreateOrSyncRemoteCopies<TLevel>(
-            LevelDataManagerBase<TLevel> manager,
+        private static bool TryFindLevels(
+            LevelDataManagerSettingsBase manager,
+            string folder,
+            out List<UnityEngine.Object> levels,
+            out string error)
+        {
+            levels = null;
+            error = null;
+            if (!AssetDatabase.IsValidFolder(folder))
+            {
+                error = $"'{folder}' is not a valid project folder.";
+                return false;
+            }
+
+            string[] guids = AssetDatabase.FindAssets(
+                "t:" + manager.LevelDataType.Name,
+                new[] { folder });
+            var paths = new List<string>(guids.Length);
+            for (int i = 0; i < guids.Length; i++)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guids[i]);
+                if (!string.IsNullOrEmpty(path))
+                    paths.Add(path);
+            }
+            paths.Sort(StringComparer.OrdinalIgnoreCase);
+
+            int count = manager.MaxLevel < 0 ? paths.Count : Mathf.Min(manager.MaxLevel, paths.Count);
+            levels = new List<UnityEngine.Object>(count);
+            for (int i = 0; i < count; i++)
+            {
+                UnityEngine.Object level = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(paths[i]);
+                if (level != null && manager.LevelDataType.IsInstanceOfType(level))
+                    levels.Add(level);
+            }
+
+            return true;
+        }
+
+        private static void CreateOrSyncRemoteCopies(
+            LevelDataManagerSettingsBase manager,
             AddressableAssetSettings settings,
             AddressableAssetGroup targetGroup,
-            IReadOnlyList<TLevel> localLevels)
-            where TLevel : UnityEngine.Object
+            IReadOnlyList<UnityEngine.Object> localLevels)
         {
+            var optionPlans = new List<OptionCopyPlan>(manager.LevelOptions.Count);
+            var seenLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(manager.AddressableLabel))
+                seenLabels.Add(manager.AddressableLabel.Trim());
+
+            for (int i = 0; i < manager.LevelOptions.Count; i++)
+            {
+                LevelDataOption option = manager.LevelOptions[i];
+                string label = option.label?.Trim();
+                string localFolder = NormalizeFolder(option.localFolderPath);
+                string destinationFolder = GetOptionAddressableFolder(option);
+
+                if (string.IsNullOrWhiteSpace(label) ||
+                    string.Equals(label, LevelDataManagerSettingsBase.MainLevelOption, StringComparison.OrdinalIgnoreCase) ||
+                    !seenLabels.Add(label))
+                {
+                    EditorUtility.DisplayDialog(
+                        "Invalid level option",
+                        $"Option {i + 1} must have a unique label, different from the main label and 'main'.",
+                        "OK");
+                    return;
+                }
+
+                if (!TryFindLevels(manager, localFolder, out List<UnityEngine.Object> optionLevels, out string findError) ||
+                    optionLevels.Count == 0)
+                {
+                    EditorUtility.DisplayDialog(
+                        "Invalid option level source",
+                        string.IsNullOrEmpty(findError)
+                            ? $"Option '{label}' has no level assets in '{localFolder}'."
+                            : findError,
+                        "OK");
+                    return;
+                }
+
+                if (!IsValidAddressableFolder(destinationFolder))
+                {
+                    EditorUtility.DisplayDialog(
+                        "Invalid option Addressable folder",
+                        $"Option '{label}' destination must be under Assets and outside Resources: '{destinationFolder}'.",
+                        "OK");
+                    return;
+                }
+
+                optionPlans.Add(new OptionCopyPlan(label, localFolder, destinationFolder, optionLevels));
+            }
+
+            if (localLevels.Count > 0 && string.IsNullOrWhiteSpace(manager.AddressableLabel))
+            {
+                EditorUtility.DisplayDialog("Missing main Addressables label", "Set the main Addressable Label before syncing main levels.", "OK");
+                return;
+            }
+
             string message =
-                $"Create or update {localLevels.Count} remote level copies?\n\n" +
-                $"Source: {manager.LevelsFolder}\nDestination: {manager.AddressableLevelsFolder}\n" +
-                $"Group: {(targetGroup != null ? targetGroup.Name : "<none>")}\nLabel: {manager.AddressableLabel}\n\n" +
-                "Existing destination assets are updated in place to preserve their GUIDs. Local source assets are not modified or deleted.";
+                $"Sync main levels: {localLevels.Count}\n" +
+                $"Main: {manager.LevelsFolder} → {manager.AddressableLevelsFolder} [{manager.AddressableLabel}]\n\n" +
+                $"A/B option sets: {optionPlans.Count}\n";
+            for (int i = 0; i < optionPlans.Count; i++)
+            {
+                OptionCopyPlan plan = optionPlans[i];
+                message += $"{plan.label}: {plan.levels.Count} level(s), {plan.localFolder} → {plan.destinationFolder}\n";
+            }
+            message += "\nExisting destination assets are updated in place to preserve their GUIDs. Local source assets are not modified or deleted.";
             if (!EditorUtility.DisplayDialog("Sync remote level copies", message, "Create / Sync", "Cancel"))
                 return;
 
             const string undoName = UndoPrefix + "Sync Remote Copies";
-            if (!AddressableLevelCopyUtility.CreateOrUpdateCopies(
-                    settings,
-                    targetGroup,
-                    localLevels,
-                    manager.AddressableLevelsFolder,
-                    manager.AddressableLabel,
-                    undoName,
-                    out AddressableLevelCopyResult result,
-                    out string error))
+            Undo.IncrementCurrentGroup();
+            int undoGroup = Undo.GetCurrentGroup();
+            Undo.SetCurrentGroupName(undoName);
+            Undo.RegisterCompleteObjectUndo(manager, undoName);
+
+            int createdCount = 0;
+            int updatedCount = 0;
+            int removedLabelCount = 0;
+            if (localLevels.Count > 0)
             {
-                EditorUtility.DisplayDialog("Could not sync remote levels", error, "OK");
-                return;
+                if (!AddressableLevelCopyUtility.CreateOrUpdateCopies(
+                        settings,
+                        targetGroup,
+                        localLevels,
+                        manager.AddressableLevelsFolder,
+                        manager.AddressableLabel,
+                        undoName,
+                        out AddressableLevelCopyResult mainResult,
+                        out string mainError))
+                {
+                    Undo.CollapseUndoOperations(undoGroup);
+                    EditorUtility.DisplayDialog("Could not sync main levels", mainError, "OK");
+                    return;
+                }
+
+                manager.SetAddressableLevelGuids(mainResult.AssetGuids);
+                createdCount += mainResult.CreatedCount;
+                updatedCount += mainResult.UpdatedCount;
+                removedLabelCount += mainResult.RemovedLabelCount;
             }
 
-            Undo.RecordObject(manager, undoName);
             manager.SetRemoteAddressableGroupGuid(targetGroup.Guid);
-            manager.SetAddressableLevelGuids(result.AssetGuids);
+
+            for (int i = 0; i < optionPlans.Count; i++)
+            {
+                OptionCopyPlan plan = optionPlans[i];
+                manager.SetLocalOptionLevelObjects(plan.label, plan.levels);
+
+                if (!AddressableLevelCopyUtility.CreateOrUpdateCopies(
+                        settings,
+                        targetGroup,
+                        plan.levels,
+                        plan.destinationFolder,
+                        plan.label,
+                        undoName,
+                        out AddressableLevelCopyResult optionResult,
+                        out string optionError))
+                {
+                    EditorUtility.SetDirty(manager);
+                    AssetDatabase.SaveAssets();
+                    Undo.CollapseUndoOperations(undoGroup);
+                    EditorUtility.DisplayDialog(
+                        "Could not sync all level options",
+                        $"Option '{plan.label}' failed after earlier catalog data may already have been updated.\n\n{optionError}",
+                        "OK");
+                    return;
+                }
+
+                createdCount += optionResult.CreatedCount;
+                updatedCount += optionResult.UpdatedCount;
+                removedLabelCount += optionResult.RemovedLabelCount;
+            }
+
             EditorUtility.SetDirty(manager);
             AssetDatabase.SaveAssets();
+            Undo.CollapseUndoOperations(undoGroup);
             Debug.Log(
-                $"{manager.GetType().Name}: synchronized {result.AssetGuids.Count} remote level copy/copies in " +
-                $"'{manager.AddressableLevelsFolder}'. Created: {result.CreatedCount}, updated: {result.UpdatedCount}, " +
-                $"labels removed from local/stale entries: {result.RemovedLabelCount}.",
+                $"{manager.GetType().Name}: synchronized main and {optionPlans.Count} option level set(s). " +
+                $"Created: {createdCount}, updated: {updatedCount}, labels removed from local/stale entries: {removedLabelCount}.",
                 manager);
         }
 
-        private static List<TLevel> GetLocalLevels<TLevel>(LevelDataManagerBase<TLevel> manager)
-            where TLevel : UnityEngine.Object
+        private static string GetOptionAddressableFolder(LevelDataOption option)
+        {
+            string configuredFolder = NormalizeFolder(option.addressableFolderPath);
+            return !string.IsNullOrEmpty(configuredFolder)
+                ? configuredFolder
+                : NormalizeFolder(option.localFolderPath) + "Addressable";
+        }
+
+        private static bool IsValidAddressableFolder(string folder)
+        {
+            return folder.StartsWith("Assets/", StringComparison.Ordinal) &&
+                   folder.IndexOf("/Resources", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
+        private sealed class OptionCopyPlan
+        {
+            public OptionCopyPlan(
+                string label,
+                string localFolder,
+                string destinationFolder,
+                List<UnityEngine.Object> levels)
+            {
+                this.label = label;
+                this.localFolder = localFolder;
+                this.destinationFolder = destinationFolder;
+                this.levels = levels;
+            }
+
+            public readonly string label;
+            public readonly string localFolder;
+            public readonly string destinationFolder;
+            public readonly List<UnityEngine.Object> levels;
+        }
+
+        private static List<UnityEngine.Object> GetLocalLevels(LevelDataManagerSettingsBase manager)
         {
             int count = manager.LocalLevelCount;
-            var levels = new List<TLevel>(count);
+            var levels = new List<UnityEngine.Object>(count);
             for (int i = 0; i < count; i++)
-                levels.Add(manager.GetLevelData(i));
+                levels.Add(manager.GetLocalLevelObject(i));
             return levels;
         }
 
-        private static List<string> CollectRemoteLevelGuids<TLevel>(LevelDataManagerBase<TLevel> manager)
-            where TLevel : UnityEngine.Object
+        private static List<string> CollectRemoteLevelGuids(LevelDataManagerSettingsBase manager)
         {
             IReadOnlyList<UnityEngine.AddressableAssets.AssetReference> references = manager.AddressableLevels;
             var guids = new List<string>(references != null ? references.Count : 0);
@@ -456,13 +661,12 @@ namespace Eternals.LevelManagement.Editor
             return guids;
         }
 
-        private static void SetRemoteRegistration<TLevel>(
-            LevelDataManagerBase<TLevel> manager,
+        private static void SetRemoteRegistration(
+            LevelDataManagerSettingsBase manager,
             AddressableAssetSettings settings,
             AddressableAssetGroup targetGroup,
             IReadOnlyList<string> guids,
             bool enable)
-            where TLevel : UnityEngine.Object
         {
             if (!AddressableLevelRegistrationUtility.TryGetChangeCount(settings, targetGroup, guids, manager.AddressableLabel, enable,
                     out int changeCount, out string error))
@@ -513,6 +717,25 @@ namespace Eternals.LevelManagement.Editor
             return string.IsNullOrWhiteSpace(folder)
                 ? string.Empty
                 : folder.Replace('\\', '/').TrimEnd('/');
+        }
+    }
+
+    [CustomEditor(typeof(LevelDataManagerSettingsBase), true)]
+    public sealed class LevelDataManagerSettingsEditor : UnityEditor.Editor
+    {
+        public override void OnInspectorGUI()
+        {
+            DrawDefaultInspector();
+
+            if (target is ILevelDataManagerValidator validator)
+            {
+                EditorGUILayout.Space();
+                if (GUILayout.Button("Validate All Levels", GUILayout.Height(28f)))
+                    validator.ValidateLevelData();
+            }
+
+            LevelDataManagerEditorUtility.DrawLevelManagerControls(
+                (LevelDataManagerSettingsBase)target);
         }
     }
 }

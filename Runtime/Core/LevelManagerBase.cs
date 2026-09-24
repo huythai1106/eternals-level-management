@@ -58,9 +58,30 @@ namespace Eternals.LevelManagement
         protected abstract void OnLoseGame();
     }
 
+    [Serializable]
+    public struct LevelDataOption
+    {
+        [Tooltip("Addressables label and runtime option ID, for example option_1.")]
+        public string label;
+
+        [Tooltip("Local source folder containing this option's level assets.")]
+        public string localFolderPath;
+
+        [Tooltip("Destination folder for remote Addressable copies of this option's levels.")]
+        public string addressableFolderPath;
+    }
+
     public abstract class LevelDataManagerSettingsBase : ScriptableObject
     {
         private const string DefaultLevelFolderPath = "Assets/Levels";
+        public const string MainLevelOption = "main";
+
+        [Serializable]
+        private sealed class LocalOptionLevels
+        {
+            public string label;
+            public List<UnityEngine.Object> levels = new();
+        }
 
         [Header("Level Catalog")]
         [Tooltip("Project folder scanned by the package Editor tool when updating the local level list.")]
@@ -77,6 +98,19 @@ namespace Eternals.LevelManagement
 
         [Tooltip("Addressables group selected for remote level copies. Managed by the package Editor tool.")]
         [SerializeField, HideInInspector] private string remoteAddressableGroupGuid;
+
+        [Header("A/B Level Options")]
+        [Tooltip("Optional alternative level sets. Each label is also used as its Addressables discovery label.")]
+        [SerializeField] private LevelDataOption[] levelOptions = Array.Empty<LevelDataOption>();
+
+        [Tooltip("Preferred option label for this player. Leave as 'main' to use the standard levels.")]
+        [SerializeField] private string priorityOption = MainLevelOption;
+
+        [SerializeField, HideInInspector] private List<LocalOptionLevels> localOptionLevels = new();
+        private string preparedLevelOption = MainLevelOption;
+        private bool hasPreparedLevelOption;
+        [NonSerialized] private string runtimePriorityOption;
+        [NonSerialized] private bool hasRuntimePriorityOption;
 
         [Header("Addressables")]
         [Tooltip("Load remote Addressable levels first. Local levels remain available as an offline fallback.")]
@@ -99,6 +133,148 @@ namespace Eternals.LevelManagement
         public string RemoteAddressableGroupGuid => remoteAddressableGroupGuid;
         public string LevelsFolder => ResolveLevelsFolder();
         public string AddressableLevelsFolder => ResolveAddressableLevelsFolder();
+        public IReadOnlyList<LevelDataOption> LevelOptions => levelOptions ?? Array.Empty<LevelDataOption>();
+        public string PriorityOption => priorityOption;
+        public string CurrentLevelOption { get; private set; } = MainLevelOption;
+        public string CurrentLevelSource { get; private set; } = "None";
+        protected string PreparedLevelOption => preparedLevelOption;
+        protected bool HasPreparedLevelOption => hasPreparedLevelOption;
+
+        public abstract int LocalLevelCount { get; }
+        public abstract Type LevelDataType { get; }
+        public abstract UnityEngine.Object GetLocalLevelObject(int index);
+        public abstract void SetLocalLevelObjects(IReadOnlyList<UnityEngine.Object> sourceLevels);
+
+        /// <summary>
+        /// Resolve the option assigned to this player before loading. Override this
+        /// to connect a game-specific experiment assignment service.
+        /// Return "main" or one of the configured option labels.
+        /// </summary>
+        public virtual string GetLevelOptionForLoad()
+        {
+            return hasRuntimePriorityOption ? runtimePriorityOption : priorityOption;
+        }
+
+        public string PrepareLevelOptionForLoad()
+        {
+            string requestedOption = NormalizeOptionLabel(GetLevelOptionForLoad());
+            if (!string.Equals(requestedOption, MainLevelOption, StringComparison.OrdinalIgnoreCase))
+            {
+                for (int i = 0; levelOptions != null && i < levelOptions.Length; i++)
+                {
+                    string configuredLabel = NormalizeOptionLabel(levelOptions[i].label);
+                    if (string.Equals(configuredLabel, requestedOption, StringComparison.OrdinalIgnoreCase))
+                    {
+                        CurrentLevelOption = configuredLabel;
+                        preparedLevelOption = configuredLabel;
+                        hasPreparedLevelOption = true;
+                        return CurrentLevelOption;
+                    }
+                }
+            }
+
+            CurrentLevelOption = MainLevelOption;
+            preparedLevelOption = MainLevelOption;
+            hasPreparedLevelOption = true;
+            return CurrentLevelOption;
+        }
+
+        public void SetPriorityOption(string option)
+        {
+            runtimePriorityOption = string.IsNullOrWhiteSpace(option)
+                ? MainLevelOption
+                : option.Trim();
+            hasRuntimePriorityOption = true;
+            hasPreparedLevelOption = false;
+        }
+
+        public int GetLocalOptionLevelCount(string optionLabel)
+        {
+            LocalOptionLevels optionLevels = FindLocalOptionLevels(optionLabel);
+            return optionLevels?.levels != null ? optionLevels.levels.Count : 0;
+        }
+
+        public UnityEngine.Object GetLocalOptionLevelObject(string optionLabel, int index)
+        {
+            LocalOptionLevels optionLevels = FindLocalOptionLevels(optionLabel);
+            return optionLevels?.levels != null && index >= 0 && index < optionLevels.levels.Count
+                ? optionLevels.levels[index]
+                : null;
+        }
+
+        public void SetLocalOptionLevelObjects(
+            string optionLabel,
+            IReadOnlyList<UnityEngine.Object> sourceLevels)
+        {
+            if (string.IsNullOrWhiteSpace(optionLabel))
+                return;
+
+            localOptionLevels ??= new List<LocalOptionLevels>();
+            LocalOptionLevels optionLevels = FindLocalOptionLevels(optionLabel);
+            if (optionLevels == null)
+            {
+                optionLevels = new LocalOptionLevels { label = optionLabel.Trim() };
+                localOptionLevels.Add(optionLevels);
+            }
+
+            optionLevels.levels = sourceLevels != null
+                ? new List<UnityEngine.Object>(sourceLevels)
+                : new List<UnityEngine.Object>();
+        }
+
+        public void RecordLevelLoadSource(bool addressable, string optionLabel)
+        {
+            string option = NormalizeOptionLabel(optionLabel);
+            CurrentLevelOption = option;
+            CurrentLevelSource = (addressable ? "Addressable: " : "Local: ") + option;
+        }
+
+        protected bool IsConfiguredLevelOption(string optionLabel)
+        {
+            string normalizedOption = NormalizeOptionLabel(optionLabel);
+            if (string.Equals(normalizedOption, MainLevelOption, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            for (int i = 0; levelOptions != null && i < levelOptions.Length; i++)
+            {
+                if (string.Equals(
+                        NormalizeOptionLabel(levelOptions[i].label),
+                        normalizedOption,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private LocalOptionLevels FindLocalOptionLevels(string optionLabel)
+        {
+            if (localOptionLevels == null || string.IsNullOrWhiteSpace(optionLabel))
+                return null;
+
+            for (int i = 0; i < localOptionLevels.Count; i++)
+            {
+                LocalOptionLevels optionLevels = localOptionLevels[i];
+                if (optionLevels != null && string.Equals(
+                        optionLevels.label,
+                        optionLabel,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return optionLevels;
+                }
+            }
+
+            return null;
+        }
+
+        protected static string NormalizeOptionLabel(string optionLabel)
+        {
+            return string.IsNullOrWhiteSpace(optionLabel)
+                ? MainLevelOption
+                : optionLabel.Trim();
+        }
 
         protected int SerializedAddressableLevelCount =>
             addressableLevels != null ? addressableLevels.Count : 0;
@@ -186,22 +362,99 @@ namespace Eternals.LevelManagement
         [SerializeField] protected List<TLevel> levels = new();
 
         private AddressableLevelCatalog<TLevel> runtimeAddressableCatalog;
+        private readonly List<OptionAddressableCatalog> runtimeOptionAddressableCatalogs = new();
+        private bool isAddressableCatalogInitializationInProgress;
+        private int pendingAddressableCatalogCount;
+        private bool anyAddressableCatalogSucceeded;
+        private Action<bool> addressableCatalogInitializationCompleted;
 
         public IReadOnlyList<TLevel> Levels => levels;
-        public virtual int LocalLevelCount => levels != null ? levels.Count : 0;
+        public override int LocalLevelCount => levels != null ? levels.Count : 0;
+        public override Type LevelDataType => typeof(TLevel);
 
-        public virtual int Count => !UseAddressables
-            ? LocalLevelCount
-            : runtimeAddressableCatalog != null && runtimeAddressableCatalog.Succeeded
-                ? runtimeAddressableCatalog.Count
-                : LocalLevelCount > 0
-                    ? LocalLevelCount
-                    : SerializedAddressableLevelCount;
+        public override UnityEngine.Object GetLocalLevelObject(int index)
+        {
+            return GetLevelData(index);
+        }
+
+        public override void SetLocalLevelObjects(IReadOnlyList<UnityEngine.Object> sourceLevels)
+        {
+            if (sourceLevels == null)
+            {
+                SetLocalLevels(null);
+                return;
+            }
+
+            var typedLevels = new List<TLevel>(sourceLevels.Count);
+            for (int i = 0; i < sourceLevels.Count; i++)
+            {
+                UnityEngine.Object sourceLevel = sourceLevels[i];
+                if (sourceLevel == null)
+                {
+                    typedLevels.Add(null);
+                    continue;
+                }
+
+                if (sourceLevel is not TLevel typedLevel)
+                {
+                    Debug.LogError(
+                        $"{GetType().Name} cannot store '{sourceLevel.GetType().Name}' in a " +
+                        $"'{typeof(TLevel).Name}' level list.",
+                        this);
+                    return;
+                }
+
+                typedLevels.Add(typedLevel);
+            }
+
+            SetLocalLevels(typedLevels);
+        }
+
+        public virtual int Count
+        {
+            get
+            {
+                if (!HasPreparedLevelOption)
+                    PrepareLevelOptionForLoad();
+
+                string option = PreparedLevelOption;
+                int mainCount;
+                if (!UseAddressables)
+                {
+                    mainCount = LocalLevelCount;
+                }
+                else if (!DiscoverAddressablesAtRuntime)
+                {
+                    mainCount = LocalLevelCount > 0 ? LocalLevelCount : SerializedAddressableLevelCount;
+                }
+                else if (runtimeAddressableCatalog != null && runtimeAddressableCatalog.Succeeded)
+                {
+                    mainCount = runtimeAddressableCatalog.Count;
+                }
+                else
+                {
+                    mainCount = LocalLevelCount > 0 ? LocalLevelCount : SerializedAddressableLevelCount;
+                }
+
+                if (string.Equals(option, MainLevelOption, StringComparison.OrdinalIgnoreCase))
+                    return mainCount;
+
+                int optionCount = GetLocalOptionLevelCount(option);
+                if (UseAddressables && DiscoverAddressablesAtRuntime)
+                {
+                    AddressableLevelCatalog<TLevel> optionCatalog = FindOptionAddressableCatalog(option);
+                    if (optionCatalog != null && optionCatalog.Succeeded)
+                        optionCount = Mathf.Max(optionCount, optionCatalog.Count);
+                }
+
+                return Mathf.Max(mainCount, optionCount);
+            }
+        }
 
         public virtual bool AddressableLevelsReady =>
             !UseAddressables ||
             !DiscoverAddressablesAtRuntime ||
-            (runtimeAddressableCatalog != null && runtimeAddressableCatalog.IsReady);
+            AreAllAddressableCatalogsReady();
 
         public virtual void SetLocalLevels(IReadOnlyList<TLevel> sourceLevels)
         {
@@ -238,32 +491,114 @@ namespace Eternals.LevelManagement
                 return hasRemoteReferences;
             }
 
-            if (runtimeAddressableCatalog == null ||
-                !string.Equals(
-                    runtimeAddressableCatalog.Label,
-                    AddressableLabel,
-                    StringComparison.Ordinal))
+            EnsureRuntimeAddressableCatalogs();
+            if (isAddressableCatalogInitializationInProgress)
             {
-                runtimeAddressableCatalog?.Dispose();
-                runtimeAddressableCatalog = new AddressableLevelCatalog<TLevel>(AddressableLabel);
+                addressableCatalogInitializationCompleted += completed;
+                return true;
             }
 
-            return runtimeAddressableCatalog.Initialize(succeeded =>
-            {
-                if (!succeeded)
-                {
-                    Debug.LogError(
-                        $"{GetType().Name} could not discover Addressable levels with label " +
-                        $"'{AddressableLabel}': {runtimeAddressableCatalog.LastError} " +
-                        "Local levels will be used when available.",
-                        this);
-                }
+            addressableCatalogInitializationCompleted = completed;
+            anyAddressableCatalogSucceeded = false;
+            pendingAddressableCatalogCount = 0;
 
-                completed?.Invoke(succeeded);
-            });
+            if (runtimeAddressableCatalog.Succeeded)
+                anyAddressableCatalogSucceeded = true;
+            else if (!runtimeAddressableCatalog.IsReady)
+                pendingAddressableCatalogCount++;
+
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+            {
+                AddressableLevelCatalog<TLevel> catalog = runtimeOptionAddressableCatalogs[i].catalog;
+                if (catalog.Succeeded)
+                    anyAddressableCatalogSucceeded = true;
+                else if (!catalog.IsReady)
+                    pendingAddressableCatalogCount++;
+            }
+
+            if (pendingAddressableCatalogCount == 0)
+            {
+                Action<bool> callback = addressableCatalogInitializationCompleted;
+                addressableCatalogInitializationCompleted = null;
+                callback?.Invoke(anyAddressableCatalogSucceeded);
+                return anyAddressableCatalogSucceeded;
+            }
+
+            isAddressableCatalogInitializationInProgress = true;
+            if (!runtimeAddressableCatalog.IsReady)
+            {
+                runtimeAddressableCatalog.Initialize(succeeded =>
+                {
+                    if (!succeeded)
+                    {
+                        Debug.LogWarning(
+                            $"{GetType().Name} could not discover main Addressable levels with label " +
+                            $"'{AddressableLabel}': {runtimeAddressableCatalog.LastError} " +
+                            "Local levels will be used when available.",
+                            this);
+                    }
+
+                    OnAddressableCatalogInitialized(succeeded);
+                });
+            }
+
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+            {
+                OptionAddressableCatalog optionCatalog = runtimeOptionAddressableCatalogs[i];
+                if (optionCatalog.catalog.IsReady)
+                    continue;
+
+                optionCatalog.catalog.Initialize(succeeded =>
+                {
+                    if (!succeeded)
+                    {
+                        Debug.LogWarning(
+                            $"{GetType().Name} could not discover Addressable option " +
+                            $"'{optionCatalog.label}': {optionCatalog.catalog.LastError} " +
+                            "The loader will try the main catalog and local levels.",
+                            this);
+                    }
+
+                    OnAddressableCatalogInitialized(succeeded);
+                });
+            }
+
+            return true;
         }
 
         public virtual bool TryLoadAddressableLevelAsync(
+            int index,
+            out AsyncOperationHandle<TLevel> handle)
+        {
+            return TryLoadMainAddressableLevelAsync(index, out handle);
+        }
+
+        public virtual bool TryLoadAddressableLevelAsync(
+            int index,
+            string preferredOption,
+            out AsyncOperationHandle<TLevel> handle,
+            out string sourceOption)
+        {
+            string option = NormalizeOptionLabel(preferredOption);
+            if (!string.Equals(option, MainLevelOption, StringComparison.OrdinalIgnoreCase) &&
+                TryLoadOptionAddressableLevelAsync(option, index, out handle))
+            {
+                sourceOption = option;
+                return true;
+            }
+
+            if (TryLoadMainAddressableLevelAsync(index, out handle))
+            {
+                sourceOption = MainLevelOption;
+                return true;
+            }
+
+            sourceOption = MainLevelOption;
+            handle = default;
+            return false;
+        }
+
+        public virtual bool TryLoadMainAddressableLevelAsync(
             int index,
             out AsyncOperationHandle<TLevel> handle)
         {
@@ -285,6 +620,41 @@ namespace Eternals.LevelManagement
             return false;
         }
 
+        private bool TryLoadOptionAddressableLevelAsync(
+            string optionLabel,
+            int index,
+            out AsyncOperationHandle<TLevel> handle)
+        {
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+            {
+                OptionAddressableCatalog optionCatalog = runtimeOptionAddressableCatalogs[i];
+                if (string.Equals(optionCatalog.label, optionLabel, StringComparison.OrdinalIgnoreCase) &&
+                    optionCatalog.catalog.TryLoadLevelAsync(index, out handle))
+                {
+                    return true;
+                }
+            }
+
+            handle = default;
+            return false;
+        }
+
+        private AddressableLevelCatalog<TLevel> FindOptionAddressableCatalog(string optionLabel)
+        {
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+            {
+                if (string.Equals(
+                        runtimeOptionAddressableCatalogs[i].label,
+                        optionLabel,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return runtimeOptionAddressableCatalogs[i].catalog;
+                }
+            }
+
+            return null;
+        }
+
         public virtual TLevel GetLevelData(int index)
         {
             return levels != null && index >= 0 && index < levels.Count
@@ -294,7 +664,35 @@ namespace Eternals.LevelManagement
 
         public virtual TLevel GetLocalFallbackLevelData(int requestedIndex, out int localIndex)
         {
+            return GetLocalFallbackLevelData(
+                requestedIndex,
+                PrepareLevelOptionForLoad(),
+                out localIndex,
+                out _);
+        }
+
+        public virtual TLevel GetLocalFallbackLevelData(
+            int requestedIndex,
+            string preferredOption,
+            out int localIndex,
+            out string sourceOption)
+        {
             localIndex = -1;
+            sourceOption = MainLevelOption;
+            string option = NormalizeOptionLabel(preferredOption);
+            if (!string.Equals(option, MainLevelOption, StringComparison.OrdinalIgnoreCase))
+            {
+                int optionCount = GetLocalOptionLevelCount(option);
+                if (requestedIndex >= 0 && requestedIndex < optionCount &&
+                    GetLocalOptionLevelObject(option, requestedIndex) is TLevel optionLevel &&
+                    IsConfiguredLevelOption(option))
+                {
+                    localIndex = requestedIndex;
+                    sourceOption = option;
+                    return optionLevel;
+                }
+            }
+
             int localCount = LocalLevelCount;
             if (localCount <= 0 || requestedIndex < 0)
                 return null;
@@ -308,6 +706,7 @@ namespace Eternals.LevelManagement
                     continue;
 
                 localIndex = candidateIndex;
+                sourceOption = MainLevelOption;
                 return level;
             }
 
@@ -323,6 +722,105 @@ namespace Eternals.LevelManagement
         {
             runtimeAddressableCatalog?.Dispose();
             runtimeAddressableCatalog = null;
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+                runtimeOptionAddressableCatalogs[i].catalog.Dispose();
+            runtimeOptionAddressableCatalogs.Clear();
+            isAddressableCatalogInitializationInProgress = false;
+            pendingAddressableCatalogCount = 0;
+            addressableCatalogInitializationCompleted = null;
         }
+
+        private void EnsureRuntimeAddressableCatalogs()
+        {
+            if (runtimeAddressableCatalog == null ||
+                !string.Equals(runtimeAddressableCatalog.Label, AddressableLabel, StringComparison.Ordinal))
+            {
+                runtimeAddressableCatalog?.Dispose();
+                runtimeAddressableCatalog = new AddressableLevelCatalog<TLevel>(AddressableLabel);
+            }
+
+            for (int optionIndex = 0; optionIndex < LevelOptions.Count; optionIndex++)
+            {
+                string label = LevelOptions[optionIndex].label?.Trim();
+                if (string.IsNullOrWhiteSpace(label) ||
+                    string.Equals(label, AddressableLabel, StringComparison.OrdinalIgnoreCase) ||
+                    ContainsOptionCatalog(label))
+                {
+                    continue;
+                }
+
+                runtimeOptionAddressableCatalogs.Add(
+                    new OptionAddressableCatalog(label, new AddressableLevelCatalog<TLevel>(label)));
+            }
+
+            for (int i = runtimeOptionAddressableCatalogs.Count - 1; i >= 0; i--)
+            {
+                string configuredLabel = runtimeOptionAddressableCatalogs[i].label;
+                if (IsConfiguredLevelOption(configuredLabel) &&
+                    !string.Equals(configuredLabel, AddressableLabel, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                runtimeOptionAddressableCatalogs[i].catalog.Dispose();
+                runtimeOptionAddressableCatalogs.RemoveAt(i);
+            }
+        }
+
+        private bool ContainsOptionCatalog(string label)
+        {
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+            {
+                if (string.Equals(runtimeOptionAddressableCatalogs[i].label, label, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool AreAllAddressableCatalogsReady()
+        {
+            if (runtimeAddressableCatalog == null || !runtimeAddressableCatalog.IsReady)
+                return false;
+
+            for (int i = 0; i < runtimeOptionAddressableCatalogs.Count; i++)
+            {
+                if (!runtimeOptionAddressableCatalogs[i].catalog.IsReady)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private void OnAddressableCatalogInitialized(bool succeeded)
+        {
+            anyAddressableCatalogSucceeded |= succeeded;
+            pendingAddressableCatalogCount--;
+            if (pendingAddressableCatalogCount > 0)
+                return;
+
+            isAddressableCatalogInitializationInProgress = false;
+            Action<bool> callback = addressableCatalogInitializationCompleted;
+            addressableCatalogInitializationCompleted = null;
+            callback?.Invoke(anyAddressableCatalogSucceeded);
+        }
+
+        private sealed class OptionAddressableCatalog
+        {
+            public OptionAddressableCatalog(string label, AddressableLevelCatalog<TLevel> catalog)
+            {
+                this.label = label;
+                this.catalog = catalog;
+            }
+
+            public readonly string label;
+            public readonly AddressableLevelCatalog<TLevel> catalog;
+        }
+    }
+
+    /// <summary>Optional game-specific validation action shown by the package Inspector.</summary>
+    public interface ILevelDataManagerValidator
+    {
+        void ValidateLevelData();
     }
 }
