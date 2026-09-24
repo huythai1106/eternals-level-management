@@ -106,7 +106,9 @@ namespace Eternals.LevelManagement
         [Tooltip("Preferred option label for this player. Leave as 'main' to use the standard levels.")]
         [SerializeField] private string priorityOption = MainLevelOption;
 
-        [SerializeField, HideInInspector] private List<LocalOptionLevels> localOptionLevels = new();
+        [Header("Local Option Fallback Levels")]
+        [Tooltip("Local level asset references grouped by option label. Populated by Update Local Level List and included in the player build as offline fallback data.")]
+        [SerializeField] private List<LocalOptionLevels> localOptionLevels = new();
         private string preparedLevelOption = MainLevelOption;
         private bool hasPreparedLevelOption;
         [NonSerialized] private string runtimePriorityOption;
