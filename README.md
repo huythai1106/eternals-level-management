@@ -8,17 +8,21 @@ Copy `Packages/com.eternals.level-management` into another Unity project, or pub
 
 Derive the game controller from `LevelManagerBase`. Implement `LoadLevel`, `RestartLevel`, and the protected win/lose hooks while keeping board creation, progress, UI, rewards, and analytics in the game project. `LoadNextLevel` wraps to level zero using the current dynamic `LevelCount`.
 
-Derive the game's catalog asset from `LevelDataManagerBase<TLevel>`. The package owns the serialized `Use Addressables`, `Discover Addressables At Runtime`, `Addressable Label`, and ordered remote-reference settings, plus catalog initialization and remote loading. Every derived manager receives those Inspector settings automatically.
+Derive the game's catalog asset from `LevelDataManagerBase<TLevel>`. The package owns the serialized `Use Addressables`, `Discover Addressables At Runtime`, `Addressable Label`, ordered remote-reference settings, local and Addressable folder paths, `Max Level`, and selected remote group GUID. Catalog initialization and remote loading are also package-owned.
 
-Implement `LocalLevelCount` and `GetLevelData` using the player-built local list. The inherited `GetLocalFallbackLevelData` wraps an unavailable remote index over that local list and skips null entries.
+`LevelDataManagerBase<TLevel>` owns the serialized local `levels` list and provides `Levels`, `LocalLevelCount`, `GetLevelData`, `SetLocalLevels`, and `AddLocalLevel`. Override those members only when a game needs a custom local-list representation. The inherited `GetLocalFallbackLevelData` wraps an unavailable remote index over the local list and skips null entries.
 
 Use `AddressableLevelCatalog<TLevel>` to discover `TLevel` assets by label. The catalog only loads resource locations during initialization; each level asset is loaded on demand. The caller owns loaded asset handles and must release them.
+
+Use `AddressableLevelLoader<TLevel>` to keep async remote loading, local fallback, request cancellation, and Addressables handle ownership out of the game-specific `LevelManager`. Provide callbacks for applying loaded data and handling the case where both remote and local data are unavailable. Dispose the loader with its owning game manager.
 
 `AddressableLevelCatalog<TLevel>` is composed by the package base class. The game-specific manager does not need to duplicate catalog state, serialized remote references, initialization, or async remote-load code.
 
 ## Editor integration
 
-Call `AddressableLevelRegistrationUtility.TryGetChangeCount` before confirmation, then `Apply` to register or unregister the game's level GUIDs. It validates bundled groups and asset paths, assigns the discovery label, records Undo, marks Addressables settings dirty, and saves the assets.
+In a game-specific custom Inspector, call `LevelDataManagerEditorUtility.DrawLevelManagerControls(manager)`. The package draws the shared folder/max-level/group settings and provides **Update Local Level List**, **Create / Sync Remote Addressable Copies**, and remote-registration controls. The game editor can remain focused on game-specific validation or authoring fields.
+
+`LevelDataManagerEditorUtility` calls `AddressableLevelRegistrationUtility` internally. For custom workflows, call `TryGetChangeCount` before confirmation, then `Apply` to register or unregister level GUIDs. It validates bundled groups and asset paths, assigns the discovery label, records Undo, marks Addressables settings dirty, and saves the assets.
 
 Use `AddressableLevelCopyUtility.CreateOrUpdateCopies<TLevel>` when local and remote levels must be separate assets. Pass the ordered local level list, a dedicated destination folder, the remote Addressables group, and the discovery label. The utility:
 

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.AsyncOperations;
 using UnityEngine.ResourceManagement.ResourceLocations;
 
@@ -167,6 +166,185 @@ namespace Eternals.LevelManagement.Addressables
                     ? result
                     : StringComparer.OrdinalIgnoreCase.Compare(left.InternalId, right.InternalId);
             }
+        }
+    }
+
+    /// <summary>
+    /// Loads one level on demand, falls back to the local list when the remote
+    /// request fails, and owns the pending and active Addressables handles.
+    /// </summary>
+    public sealed class AddressableLevelLoader<TLevel> : IDisposable
+        where TLevel : UnityEngine.Object
+    {
+        private readonly LevelDataManagerBase<TLevel> levelDataManager;
+
+        private AsyncOperationHandle<TLevel> pendingHandle;
+        private AsyncOperationHandle<TLevel> activeHandle;
+        private Action<TLevel, int> levelLoaded;
+        private Action<string> loadFailed;
+        private int pendingLevelIndex;
+        private bool isDisposed;
+
+        public AddressableLevelLoader(LevelDataManagerBase<TLevel> levelDataManager)
+        {
+            this.levelDataManager = levelDataManager;
+        }
+
+        public bool IsLoading => pendingHandle.IsValid();
+
+        public bool IsActiveAsset(TLevel level)
+        {
+            return activeHandle.IsValid() && activeHandle.Result == level;
+        }
+
+        public bool InitializeCatalog(Action<bool> completed = null)
+        {
+            if (isDisposed || levelDataManager == null)
+            {
+                completed?.Invoke(false);
+                return false;
+            }
+
+            return levelDataManager.InitializeAddressableLevels(completed);
+        }
+
+        /// <summary>
+        /// Returns true when an asynchronous remote request was accepted or a
+        /// local fallback was delivered to the callback.
+        /// </summary>
+        public bool Load(
+            int requestedIndex,
+            Action<TLevel, int> onLevelLoaded,
+            Action<string> onLoadFailed = null)
+        {
+            if (isDisposed || levelDataManager == null)
+            {
+                onLoadFailed?.Invoke("The level loader or its data manager is unavailable.");
+                return false;
+            }
+
+            CancelPendingLoad();
+
+            if (!levelDataManager.UseAddressables)
+                return LoadLocalLevel(requestedIndex, onLevelLoaded, onLoadFailed, null);
+
+            if (!levelDataManager.TryLoadAddressableLevelAsync(requestedIndex, out pendingHandle))
+            {
+                return LoadLocalLevel(
+                    requestedIndex,
+                    onLevelLoaded,
+                    onLoadFailed,
+                    "no valid Addressables location or reference was found");
+            }
+
+            pendingLevelIndex = requestedIndex;
+            levelLoaded = onLevelLoaded;
+            loadFailed = onLoadFailed;
+            pendingHandle.Completed += OnRemoteLevelLoaded;
+            return true;
+        }
+
+        public void CancelPendingLoad()
+        {
+            if (pendingHandle.IsValid())
+            {
+                pendingHandle.Completed -= OnRemoteLevelLoaded;
+                UnityEngine.AddressableAssets.Addressables.Release(pendingHandle);
+                pendingHandle = default;
+            }
+
+            levelLoaded = null;
+            loadFailed = null;
+        }
+
+        public void ReleaseActiveAsset()
+        {
+            if (!activeHandle.IsValid())
+                return;
+
+            UnityEngine.AddressableAssets.Addressables.Release(activeHandle);
+            activeHandle = default;
+        }
+
+        public void ReleaseActiveAssetUnless(TLevel asset)
+        {
+            if (IsActiveAsset(asset))
+                return;
+
+            ReleaseActiveAsset();
+        }
+
+        public void Dispose()
+        {
+            if (isDisposed)
+                return;
+
+            isDisposed = true;
+            CancelPendingLoad();
+            ReleaseActiveAsset();
+        }
+
+        private void OnRemoteLevelLoaded(AsyncOperationHandle<TLevel> handle)
+        {
+            if (!pendingHandle.IsValid() || !handle.Equals(pendingHandle))
+                return;
+
+            handle.Completed -= OnRemoteLevelLoaded;
+            int requestedIndex = pendingLevelIndex;
+            Action<TLevel, int> onLoaded = levelLoaded;
+            Action<string> onFailed = loadFailed;
+            pendingHandle = default;
+            levelLoaded = null;
+            loadFailed = null;
+
+            if (handle.Status != AsyncOperationStatus.Succeeded || handle.Result == null)
+            {
+                string reason = handle.OperationException != null
+                    ? handle.OperationException.Message
+                    : "Addressables returned an empty level asset";
+                UnityEngine.AddressableAssets.Addressables.Release(handle);
+                LoadLocalLevel(requestedIndex, onLoaded, onFailed, reason);
+                return;
+            }
+
+            AsyncOperationHandle<TLevel> previousHandle = activeHandle;
+            activeHandle = handle;
+            onLoaded?.Invoke(handle.Result, requestedIndex);
+            if (previousHandle.IsValid())
+                UnityEngine.AddressableAssets.Addressables.Release(previousHandle);
+        }
+
+        private bool LoadLocalLevel(
+            int requestedIndex,
+            Action<TLevel, int> onLoaded,
+            Action<string> onFailed,
+            string remoteFailure)
+        {
+            TLevel localLevel = levelDataManager.GetLocalFallbackLevelData(
+                requestedIndex,
+                out int localIndex);
+
+            if (localLevel == null)
+            {
+                string reason = string.IsNullOrEmpty(remoteFailure)
+                    ? $"No local level exists for requested index {requestedIndex}."
+                    : $"Could not load remote level {requestedIndex} ({remoteFailure}), and no local fallback level is available.";
+                Debug.LogError(reason, levelDataManager);
+                onFailed?.Invoke(reason);
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(remoteFailure))
+            {
+                Debug.LogWarning(
+                    $"Could not load remote level {requestedIndex} ({remoteFailure}). " +
+                    $"Loading local level {localIndex} instead.",
+                    levelDataManager);
+            }
+
+            onLoaded?.Invoke(localLevel, requestedIndex);
+            ReleaseActiveAsset();
+            return true;
         }
     }
 }

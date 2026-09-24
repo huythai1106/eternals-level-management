@@ -60,6 +60,24 @@ namespace Eternals.LevelManagement
 
     public abstract class LevelDataManagerSettingsBase : ScriptableObject
     {
+        private const string DefaultLevelFolderPath = "Assets/Levels";
+
+        [Header("Level Catalog")]
+        [Tooltip("Project folder scanned by the package Editor tool when updating the local level list.")]
+        [SerializeField, HideInInspector] private string levelFolderPath = DefaultLevelFolderPath;
+
+        // Retained with its original serialized name so existing game assets keep their folder value.
+        [SerializeField, HideInInspector] private string levelsFolder = DefaultLevelFolderPath;
+
+        [Tooltip("Optional destination for remote Addressable copies. Empty uses a sibling folder ending in 'Addressable'.")]
+        [SerializeField, HideInInspector] private string addressableLevelFolderPath;
+
+        [Tooltip("Maximum number of local levels to include when scanning the level folder. -1 includes all levels.")]
+        [SerializeField, HideInInspector] private int maxLevel = -1;
+
+        [Tooltip("Addressables group selected for remote level copies. Managed by the package Editor tool.")]
+        [SerializeField, HideInInspector] private string remoteAddressableGroupGuid;
+
         [Header("Addressables")]
         [Tooltip("Load remote Addressable levels first. Local levels remain available as an offline fallback.")]
         [SerializeField] private bool useAddressables;
@@ -77,6 +95,10 @@ namespace Eternals.LevelManagement
         public bool DiscoverAddressablesAtRuntime => discoverAddressablesAtRuntime;
         public string AddressableLabel => addressableLabel;
         public IReadOnlyList<AssetReference> AddressableLevels => addressableLevels;
+        public int MaxLevel => maxLevel;
+        public string RemoteAddressableGroupGuid => remoteAddressableGroupGuid;
+        public string LevelsFolder => ResolveLevelsFolder();
+        public string AddressableLevelsFolder => ResolveAddressableLevelsFolder();
 
         protected int SerializedAddressableLevelCount =>
             addressableLevels != null ? addressableLevels.Count : 0;
@@ -95,6 +117,62 @@ namespace Eternals.LevelManagement
             for (int i = 0; i < count; i++)
                 addressableLevels.Add(new AssetReference(assetGuids[i]));
         }
+
+        public void SetLevelFolderPath(string path)
+        {
+            string normalized = NormalizeFolder(path);
+            levelFolderPath = normalized;
+            levelsFolder = normalized;
+        }
+
+        public void SetAddressableLevelFolderPath(string path)
+        {
+            addressableLevelFolderPath = NormalizeFolder(path);
+        }
+
+        public void SetMaxLevel(int value)
+        {
+            maxLevel = value < 0 ? -1 : value;
+        }
+
+        public void SetRemoteAddressableGroupGuid(string guid)
+        {
+            remoteAddressableGroupGuid = guid ?? string.Empty;
+        }
+
+        private string ResolveLevelsFolder()
+        {
+            string configuredPath = NormalizeFolder(levelFolderPath);
+            string legacyPath = NormalizeFolder(levelsFolder);
+
+            // Older assets may only have the legacy field, or retain its custom value
+            // while the newer field still has the package default.
+            if (string.Equals(configuredPath, DefaultLevelFolderPath, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(legacyPath) &&
+                !string.Equals(legacyPath, DefaultLevelFolderPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return legacyPath;
+            }
+
+            return string.IsNullOrEmpty(configuredPath)
+                ? (string.IsNullOrEmpty(legacyPath) ? DefaultLevelFolderPath : legacyPath)
+                : configuredPath;
+        }
+
+        private string ResolveAddressableLevelsFolder()
+        {
+            string configuredPath = NormalizeFolder(addressableLevelFolderPath);
+            return !string.IsNullOrEmpty(configuredPath)
+                ? configuredPath
+                : LevelsFolder + "Addressable";
+        }
+
+        private static string NormalizeFolder(string folder)
+        {
+            return string.IsNullOrWhiteSpace(folder)
+                ? string.Empty
+                : folder.Replace('\\', '/').TrimEnd('/');
+        }
     }
 
     /// <summary>
@@ -104,7 +182,13 @@ namespace Eternals.LevelManagement
     public abstract class LevelDataManagerBase<TLevel> : LevelDataManagerSettingsBase
         where TLevel : UnityEngine.Object
     {
+        [Tooltip("Local levels included in the player build and used when remote catalog or level loading fails.")]
+        [SerializeField] protected List<TLevel> levels = new();
+
         private AddressableLevelCatalog<TLevel> runtimeAddressableCatalog;
+
+        public IReadOnlyList<TLevel> Levels => levels;
+        public virtual int LocalLevelCount => levels != null ? levels.Count : 0;
 
         public virtual int Count => !UseAddressables
             ? LocalLevelCount
@@ -119,7 +203,25 @@ namespace Eternals.LevelManagement
             !DiscoverAddressablesAtRuntime ||
             (runtimeAddressableCatalog != null && runtimeAddressableCatalog.IsReady);
 
-        public abstract int LocalLevelCount { get; }
+        public virtual void SetLocalLevels(IReadOnlyList<TLevel> sourceLevels)
+        {
+            levels = sourceLevels != null
+                ? new List<TLevel>(sourceLevels)
+                : new List<TLevel>();
+        }
+
+        public bool AddLocalLevel(TLevel level)
+        {
+            if (level == null)
+                return false;
+
+            levels ??= new List<TLevel>();
+            if (levels.Contains(level))
+                return false;
+
+            levels.Add(level);
+            return true;
+        }
 
         public virtual bool InitializeAddressableLevels(Action<bool> completed = null)
         {
@@ -183,7 +285,12 @@ namespace Eternals.LevelManagement
             return false;
         }
 
-        public abstract TLevel GetLevelData(int index);
+        public virtual TLevel GetLevelData(int index)
+        {
+            return levels != null && index >= 0 && index < levels.Count
+                ? levels[index]
+                : null;
+        }
 
         public virtual TLevel GetLocalFallbackLevelData(int requestedIndex, out int localIndex)
         {
