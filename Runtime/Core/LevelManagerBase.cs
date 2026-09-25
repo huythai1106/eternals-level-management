@@ -8,6 +8,103 @@ using UnityEngine.ResourceManagement.AsyncOperations;
 namespace Eternals.LevelManagement
 {
     /// <summary>
+    /// Sorts level names and asset paths in human numeric order, so "Level 2"
+    /// appears before "Level 10". Comparison is culture-independent and does
+    /// not allocate temporary strings.
+    /// </summary>
+    public sealed class NaturalLevelNameComparer : IComparer<string>
+    {
+        public static readonly NaturalLevelNameComparer Instance = new();
+
+        private NaturalLevelNameComparer()
+        {
+        }
+
+        public int Compare(string left, string right)
+        {
+            if (ReferenceEquals(left, right))
+                return 0;
+            if (left == null)
+                return -1;
+            if (right == null)
+                return 1;
+
+            int leftIndex = 0;
+            int rightIndex = 0;
+            while (leftIndex < left.Length && rightIndex < right.Length)
+            {
+                if (IsAsciiDigit(left[leftIndex]) && IsAsciiDigit(right[rightIndex]))
+                {
+                    int result = CompareDigitRuns(left, ref leftIndex, right, ref rightIndex);
+                    if (result != 0)
+                        return result;
+                    continue;
+                }
+
+                int characterResult = char.ToUpperInvariant(left[leftIndex])
+                    .CompareTo(char.ToUpperInvariant(right[rightIndex]));
+                if (characterResult != 0)
+                    return characterResult;
+
+                leftIndex++;
+                rightIndex++;
+            }
+
+            if (leftIndex < left.Length)
+                return 1;
+            if (rightIndex < right.Length)
+                return -1;
+
+            return StringComparer.Ordinal.Compare(left, right);
+        }
+
+        private static int CompareDigitRuns(
+            string left,
+            ref int leftIndex,
+            string right,
+            ref int rightIndex)
+        {
+            int leftStart = leftIndex;
+            while (leftIndex < left.Length && IsAsciiDigit(left[leftIndex]))
+                leftIndex++;
+
+            int rightStart = rightIndex;
+            while (rightIndex < right.Length && IsAsciiDigit(right[rightIndex]))
+                rightIndex++;
+
+            int leftSignificantStart = leftStart;
+            while (leftSignificantStart < leftIndex - 1 && left[leftSignificantStart] == '0')
+                leftSignificantStart++;
+
+            int rightSignificantStart = rightStart;
+            while (rightSignificantStart < rightIndex - 1 && right[rightSignificantStart] == '0')
+                rightSignificantStart++;
+
+            int leftSignificantLength = leftIndex - leftSignificantStart;
+            int rightSignificantLength = rightIndex - rightSignificantStart;
+            if (leftSignificantLength != rightSignificantLength)
+                return leftSignificantLength.CompareTo(rightSignificantLength);
+
+            for (int offset = 0; offset < leftSignificantLength; offset++)
+            {
+                int digitResult = left[leftSignificantStart + offset]
+                    .CompareTo(right[rightSignificantStart + offset]);
+                if (digitResult != 0)
+                    return digitResult;
+            }
+
+            int leftRunLength = leftIndex - leftStart;
+            int rightRunLength = rightIndex - rightStart;
+            return leftRunLength.CompareTo(rightRunLength);
+        }
+
+        private static bool IsAsciiDigit(char character)
+        {
+            return character >= '0' && character <= '9';
+        }
+    }
+
+    /// <summary>
     /// Game-agnostic level lifecycle contract. Concrete games own their board,
     /// progress, UI, rewards, analytics, and level-data types.
     /// </summary>

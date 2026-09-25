@@ -161,10 +161,10 @@ namespace Eternals.LevelManagement.Addressables
                 if (right == null)
                     return 1;
 
-                int result = StringComparer.OrdinalIgnoreCase.Compare(left.PrimaryKey, right.PrimaryKey);
+                int result = NaturalLevelNameComparer.Instance.Compare(left.PrimaryKey, right.PrimaryKey);
                 return result != 0
                     ? result
-                    : StringComparer.OrdinalIgnoreCase.Compare(left.InternalId, right.InternalId);
+                    : NaturalLevelNameComparer.Instance.Compare(left.InternalId, right.InternalId);
             }
         }
     }

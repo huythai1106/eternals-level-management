@@ -435,7 +435,7 @@ namespace Eternals.LevelManagement.Editor
                 if (!string.IsNullOrEmpty(path))
                     paths.Add(path);
             }
-            paths.Sort(StringComparer.OrdinalIgnoreCase);
+            paths.Sort(NaturalLevelNameComparer.Instance);
 
             int count = manager.MaxLevel < 0 ? paths.Count : Mathf.Min(manager.MaxLevel, paths.Count);
             levels = new List<UnityEngine.Object>(count);
