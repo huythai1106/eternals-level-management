@@ -622,7 +622,7 @@ namespace Eternals.LevelManagement
             return false;
         }
 
-        private bool TryLoadOptionAddressableLevelAsync(
+        public virtual bool TryLoadOptionAddressableLevelAsync(
             string optionLabel,
             int index,
             out AsyncOperationHandle<TLevel> handle)

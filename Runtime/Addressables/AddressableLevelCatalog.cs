@@ -239,26 +239,57 @@ namespace Eternals.LevelManagement.Addressables
                     null);
             }
 
-            if (!levelDataManager.TryLoadAddressableLevelAsync(
+            bool hasPreferredOption = !string.Equals(
+                preferredOption,
+                LevelDataManagerSettingsBase.MainLevelOption,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (hasPreferredOption &&
+                levelDataManager.TryLoadOptionAddressableLevelAsync(
+                    preferredOption,
+                    requestedIndex,
+                    out AsyncOperationHandle<TLevel> optionHandle))
+            {
+                return BeginRemoteLoad(
                     requestedIndex,
                     preferredOption,
-                    out pendingHandle,
-                    out pendingSourceOption))
-            {
-                return LoadLocalLevel(
+                    preferredOption,
+                    optionHandle,
+                    onLevelLoaded,
+                    onLoadFailed);
+            }
+
+            if (hasPreferredOption && TryLoadLocalOptionLevel(
                     requestedIndex,
                     preferredOption,
                     onLevelLoaded,
-                    onLoadFailed,
-                    "no valid Addressables location or reference was found");
+                    "no valid Addressables location or reference was found"))
+            {
+                return true;
             }
 
-            pendingLevelIndex = requestedIndex;
-            pendingPreferredOption = preferredOption;
-            levelLoaded = onLevelLoaded;
-            loadFailed = onLoadFailed;
-            pendingHandle.Completed += OnRemoteLevelLoaded;
-            return true;
+            if (levelDataManager.TryLoadMainAddressableLevelAsync(
+                    requestedIndex,
+                    out AsyncOperationHandle<TLevel> mainHandle))
+            {
+                return BeginRemoteLoad(
+                    requestedIndex,
+                    preferredOption,
+                    LevelDataManagerSettingsBase.MainLevelOption,
+                    mainHandle,
+                    onLevelLoaded,
+                    onLoadFailed);
+            }
+
+            string missingRemoteReason = hasPreferredOption
+                ? "no valid Addressables location or reference was found for the option or main level"
+                : "no valid Addressables location or reference was found";
+            return LoadLocalLevel(
+                requestedIndex,
+                LevelDataManagerSettingsBase.MainLevelOption,
+                onLevelLoaded,
+                onLoadFailed,
+                missingRemoteReason);
         }
 
         public void CancelPendingLoad()
@@ -323,11 +354,23 @@ namespace Eternals.LevelManagement.Addressables
                     : "Addressables returned an empty level asset";
                 UnityEngine.AddressableAssets.Addressables.Release(handle);
 
-                if (!string.Equals(
-                        pendingSourceOption,
-                        LevelDataManagerSettingsBase.MainLevelOption,
-                        StringComparison.OrdinalIgnoreCase) &&
-                    levelDataManager.TryLoadMainAddressableLevelAsync(requestedIndex, out pendingHandle))
+                bool failedPreferredOption = !string.Equals(
+                    pendingSourceOption,
+                    LevelDataManagerSettingsBase.MainLevelOption,
+                    StringComparison.OrdinalIgnoreCase);
+
+                if (failedPreferredOption && TryLoadLocalOptionLevel(
+                        requestedIndex,
+                        pendingPreferredOption,
+                        onLoaded,
+                        reason))
+                {
+                    return;
+                }
+
+                if (failedPreferredOption && levelDataManager.TryLoadMainAddressableLevelAsync(
+                        requestedIndex,
+                        out pendingHandle))
                 {
                     pendingSourceOption = LevelDataManagerSettingsBase.MainLevelOption;
                     levelLoaded = onLoaded;
@@ -336,7 +379,12 @@ namespace Eternals.LevelManagement.Addressables
                     return;
                 }
 
-                LoadLocalLevel(requestedIndex, pendingPreferredOption, onLoaded, onFailed, reason);
+                LoadLocalLevel(
+                    requestedIndex,
+                    LevelDataManagerSettingsBase.MainLevelOption,
+                    onLoaded,
+                    onFailed,
+                    reason);
                 return;
             }
 
@@ -346,6 +394,54 @@ namespace Eternals.LevelManagement.Addressables
             onLoaded?.Invoke(handle.Result, requestedIndex);
             if (previousHandle.IsValid())
                 UnityEngine.AddressableAssets.Addressables.Release(previousHandle);
+        }
+
+        private bool BeginRemoteLoad(
+            int requestedIndex,
+            string preferredOption,
+            string sourceOption,
+            AsyncOperationHandle<TLevel> handle,
+            Action<TLevel, int> onLoaded,
+            Action<string> onFailed)
+        {
+            pendingHandle = handle;
+            pendingLevelIndex = requestedIndex;
+            pendingPreferredOption = preferredOption;
+            pendingSourceOption = sourceOption;
+            levelLoaded = onLoaded;
+            loadFailed = onFailed;
+            pendingHandle.Completed += OnRemoteLevelLoaded;
+            return true;
+        }
+
+        private bool TryLoadLocalOptionLevel(
+            int requestedIndex,
+            string option,
+            Action<TLevel, int> onLoaded,
+            string remoteFailure)
+        {
+            if (requestedIndex < 0 ||
+                requestedIndex >= levelDataManager.GetLocalOptionLevelCount(option))
+            {
+                return false;
+            }
+
+            TLevel localLevel = levelDataManager.GetLocalOptionLevelObject(option, requestedIndex) as TLevel;
+            if (localLevel == null)
+                return false;
+
+            if (!string.IsNullOrEmpty(remoteFailure))
+            {
+                Debug.LogWarning(
+                    $"Could not load remote level {requestedIndex} for option '{option}' " +
+                    $"({remoteFailure}). Loading the local '{option}' level instead.",
+                    levelDataManager);
+            }
+
+            levelDataManager.RecordLevelLoadSource(false, option);
+            onLoaded?.Invoke(localLevel, requestedIndex);
+            ReleaseActiveAsset();
+            return true;
         }
 
         private bool LoadLocalLevel(
