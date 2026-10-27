@@ -56,11 +56,21 @@ namespace Eternals.LevelManagement.Addressables
             }
 
             isInitializing = true;
+            // Cập nhật catalog remote trước để lần mở đầu đã thấy level mới.
+            AddressableCatalogUpdater.EnsureUpdated(LoadLocations);
+            return true;
+        }
+
+        private void LoadLocations()
+        {
+            // Dispose có thể đã chạy trong lúc chờ cập nhật catalog.
+            if (!isInitializing)
+                return;
+
             locationHandle = UnityEngine.AddressableAssets.Addressables.LoadResourceLocationsAsync(
                 label,
                 typeof(TLevel));
             locationHandle.Completed += OnLocationsLoaded;
-            return true;
         }
 
         public bool TryGetLocation(int index, out IResourceLocation location)
@@ -451,6 +461,16 @@ namespace Eternals.LevelManagement.Addressables
             Action<string> onFailed,
             string remoteFailure)
         {
+            if (levelDataManager.UsesAddressableLocalLevels)
+            {
+                // Local levels are loaded asynchronously in this mode; this loader only supports the synchronous local list.
+                string unsupported = $"AddressableLevelLoader cannot deliver local level {requestedIndex} because the data manager uses " +
+                                     $"{nameof(LocalLevelStorage)}.{nameof(LocalLevelStorage.Addressables)}. Use TryLoadLocalFallbackLevelAsync instead.";
+                Debug.LogError(unsupported, levelDataManager);
+                onFailed?.Invoke(unsupported);
+                return false;
+            }
+
             TLevel localLevel = levelDataManager.GetLocalFallbackLevelData(
                 requestedIndex,
                 preferredOption,

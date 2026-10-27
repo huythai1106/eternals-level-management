@@ -155,6 +155,19 @@ namespace Eternals.LevelManagement
         protected abstract void OnLoseGame();
     }
 
+    /// <summary>How local (offline fallback) levels are stored in the catalog asset.</summary>
+    public enum LocalLevelStorage
+    {
+        /// <summary>Hard asset references. Every local level is loaded together with the catalog asset.</summary>
+        DirectReferences = 0,
+
+        /// <summary>
+        /// Local levels are entries in a local Addressables group and the catalog stores only references.
+        /// A level is loaded on demand, so memory and startup cost do not grow with the level count.
+        /// </summary>
+        Addressables = 1
+    }
+
     [Serializable]
     public struct LevelDataOption
     {
@@ -178,6 +191,7 @@ namespace Eternals.LevelManagement
         {
             public string label;
             public List<UnityEngine.Object> levels = new();
+            public List<AssetReference> references = new();
         }
 
         [Header("Level Catalog")]
@@ -206,6 +220,16 @@ namespace Eternals.LevelManagement
         [Header("Local Option Fallback Levels")]
         [Tooltip("Local level asset references grouped by option label. Populated by Update Local Level List and included in the player build as offline fallback data.")]
         [SerializeField] private List<LocalOptionLevels> localOptionLevels = new();
+
+        [Header("Local Level Storage")]
+        [Tooltip("DirectReferences loads every local level with this asset. Addressables stores local levels in a local group and loads them on demand.")]
+        [SerializeField] private LocalLevelStorage localLevelStorage = LocalLevelStorage.DirectReferences;
+
+        [Tooltip("Local Addressables group that holds the local levels when storage is Addressables. Managed by the package Editor tool.")]
+        [SerializeField, HideInInspector] private string localAddressableGroupGuid;
+
+        [Tooltip("Ordered local level references used when storage is Addressables.")]
+        [SerializeField, HideInInspector] private List<AssetReference> localAddressableLevels = new();
         private string preparedLevelOption = MainLevelOption;
         private bool hasPreparedLevelOption;
         [NonSerialized] private string runtimePriorityOption;
@@ -230,6 +254,10 @@ namespace Eternals.LevelManagement
         public IReadOnlyList<AssetReference> AddressableLevels => addressableLevels;
         public int MaxLevel => maxLevel;
         public string RemoteAddressableGroupGuid => remoteAddressableGroupGuid;
+        public LocalLevelStorage LocalStorage => localLevelStorage;
+        public bool UsesAddressableLocalLevels => localLevelStorage == LocalLevelStorage.Addressables;
+        public string LocalAddressableGroupGuid => localAddressableGroupGuid;
+        protected List<AssetReference> LocalAddressableLevelReferences => localAddressableLevels ??= new List<AssetReference>();
         public string LevelsFolder => ResolveLevelsFolder();
         public string AddressableLevelsFolder => ResolveAddressableLevelsFolder();
         public IReadOnlyList<LevelDataOption> LevelOptions => levelOptions ?? Array.Empty<LevelDataOption>();
@@ -240,6 +268,9 @@ namespace Eternals.LevelManagement
         protected bool HasPreparedLevelOption => hasPreparedLevelOption;
 
         public abstract int LocalLevelCount { get; }
+
+        /// <summary>Number of local levels still held as hard asset references (they are loaded together with this asset).</summary>
+        public virtual int DirectReferenceCount => 0;
         public abstract Type LevelDataType { get; }
         public abstract UnityEngine.Object GetLocalLevelObject(int index);
         public abstract void SetLocalLevelObjects(IReadOnlyList<UnityEngine.Object> sourceLevels);
@@ -290,18 +321,40 @@ namespace Eternals.LevelManagement
         public int GetLocalOptionLevelCount(string optionLabel)
         {
             LocalOptionLevels optionLevels = FindLocalOptionLevels(optionLabel);
-            return optionLevels?.levels != null ? optionLevels.levels.Count : 0;
+            if (optionLevels == null)
+                return 0;
+
+            if (UsesAddressableLocalLevels)
+                return optionLevels.references != null ? optionLevels.references.Count : 0;
+
+            return optionLevels.levels != null ? optionLevels.levels.Count : 0;
         }
 
+        /// <summary>
+        /// Returns the local option level asset. With Addressables storage this works in the Editor only
+        /// (the asset is resolved from its reference); at runtime use the asynchronous loading methods.
+        /// </summary>
         public UnityEngine.Object GetLocalOptionLevelObject(string optionLabel, int index)
         {
+            if (UsesAddressableLocalLevels)
+                return ResolveEditorAsset(GetLocalOptionLevelReference(optionLabel, index));
+
             LocalOptionLevels optionLevels = FindLocalOptionLevels(optionLabel);
             return optionLevels?.levels != null && index >= 0 && index < optionLevels.levels.Count
                 ? optionLevels.levels[index]
                 : null;
         }
 
-        public void SetLocalOptionLevelObjects(
+        /// <summary>Addressables reference of a local option level (Addressables storage only).</summary>
+        protected AssetReference GetLocalOptionLevelReference(string optionLabel, int index)
+        {
+            LocalOptionLevels optionLevels = FindLocalOptionLevels(optionLabel);
+            return optionLevels?.references != null && index >= 0 && index < optionLevels.references.Count
+                ? optionLevels.references[index]
+                : null;
+        }
+
+        public virtual void SetLocalOptionLevelObjects(
             string optionLabel,
             IReadOnlyList<UnityEngine.Object> sourceLevels)
         {
@@ -316,9 +369,19 @@ namespace Eternals.LevelManagement
                 localOptionLevels.Add(optionLevels);
             }
 
-            optionLevels.levels = sourceLevels != null
-                ? new List<UnityEngine.Object>(sourceLevels)
-                : new List<UnityEngine.Object>();
+            if (UsesAddressableLocalLevels)
+            {
+                // No hard references: only the Addressables references are stored.
+                optionLevels.levels = new List<UnityEngine.Object>();
+                optionLevels.references = CreateAssetReferences(sourceLevels);
+            }
+            else
+            {
+                optionLevels.levels = sourceLevels != null
+                    ? new List<UnityEngine.Object>(sourceLevels)
+                    : new List<UnityEngine.Object>();
+                optionLevels.references = new List<AssetReference>();
+            }
         }
 
         public void RecordLevelLoadSource(bool addressable, string optionLabel)
@@ -415,6 +478,45 @@ namespace Eternals.LevelManagement
             remoteAddressableGroupGuid = guid ?? string.Empty;
         }
 
+        public void SetLocalLevelStorage(LocalLevelStorage storage)
+        {
+            localLevelStorage = storage;
+        }
+
+        public void SetLocalAddressableGroupGuid(string guid)
+        {
+            localAddressableGroupGuid = guid ?? string.Empty;
+        }
+
+        /// <summary>Builds Addressables references from level assets. Editor only; returns invalid references at runtime.</summary>
+        protected static List<AssetReference> CreateAssetReferences(IReadOnlyList<UnityEngine.Object> assets)
+        {
+            int count = assets != null ? assets.Count : 0;
+            var references = new List<AssetReference>(count);
+            for (int i = 0; i < count; i++)
+            {
+#if UNITY_EDITOR
+                string path = assets[i] != null ? UnityEditor.AssetDatabase.GetAssetPath(assets[i]) : null;
+                string guid = string.IsNullOrEmpty(path) ? string.Empty : UnityEditor.AssetDatabase.AssetPathToGUID(path);
+                references.Add(new AssetReference(guid));
+#else
+                references.Add(new AssetReference());
+#endif
+            }
+
+            return references;
+        }
+
+        /// <summary>Resolves a reference to its asset in the Editor; always null in a player build.</summary>
+        protected static UnityEngine.Object ResolveEditorAsset(AssetReference reference)
+        {
+#if UNITY_EDITOR
+            return reference != null && reference.RuntimeKeyIsValid() ? reference.editorAsset : null;
+#else
+            return null;
+#endif
+        }
+
         private string ResolveLevelsFolder()
         {
             string configuredPath = NormalizeFolder(levelFolderPath);
@@ -468,7 +570,10 @@ namespace Eternals.LevelManagement
         private Action<bool> addressableCatalogInitializationCompleted;
 
         public IReadOnlyList<TLevel> Levels => levels;
-        public override int LocalLevelCount => levels != null ? levels.Count : 0;
+        public override int DirectReferenceCount => levels != null ? levels.Count : 0;
+        public override int LocalLevelCount => UsesAddressableLocalLevels
+            ? LocalAddressableLevelReferences.Count
+            : (levels != null ? levels.Count : 0);
         public override Type LevelDataType => typeof(TLevel);
 
         public override UnityEngine.Object GetLocalLevelObject(int index)
@@ -557,15 +662,46 @@ namespace Eternals.LevelManagement
 
         public virtual void SetLocalLevels(IReadOnlyList<TLevel> sourceLevels)
         {
+            if (UsesAddressableLocalLevels)
+            {
+                // No hard references: only the Addressables references are stored.
+                levels = new List<TLevel>();
+                List<AssetReference> target = LocalAddressableLevelReferences;
+                target.Clear();
+                target.AddRange(CreateAssetReferences(ToObjectList(sourceLevels)));
+                return;
+            }
+
             levels = sourceLevels != null
                 ? new List<TLevel>(sourceLevels)
                 : new List<TLevel>();
+        }
+
+        private static List<UnityEngine.Object> ToObjectList(IReadOnlyList<TLevel> source)
+        {
+            var list = new List<UnityEngine.Object>(source != null ? source.Count : 0);
+            for (int i = 0; source != null && i < source.Count; i++)
+                list.Add(source[i]);
+            return list;
         }
 
         public bool AddLocalLevel(TLevel level)
         {
             if (level == null)
                 return false;
+
+            if (UsesAddressableLocalLevels)
+            {
+                AssetReference reference = CreateAssetReferences(new UnityEngine.Object[] { level })[0];
+                for (int i = 0; i < LocalAddressableLevelReferences.Count; i++)
+                {
+                    if (LocalAddressableLevelReferences[i].AssetGUID == reference.AssetGUID)
+                        return false;
+                }
+
+                LocalAddressableLevelReferences.Add(reference);
+                return true;
+            }
 
             levels ??= new List<TLevel>();
             if (levels.Contains(level))
@@ -754,11 +890,100 @@ namespace Eternals.LevelManagement
             return null;
         }
 
+        /// <summary>
+        /// Returns the local level at an index. With Addressables storage this resolves in the Editor only
+        /// and returns null in a player build; use <see cref="TryLoadLocalLevelAsync"/> at runtime.
+        /// </summary>
         public virtual TLevel GetLevelData(int index)
         {
+            if (UsesAddressableLocalLevels)
+                return ResolveEditorAsset(GetLocalLevelReference(index)) as TLevel;
+
             return levels != null && index >= 0 && index < levels.Count
                 ? levels[index]
                 : null;
+        }
+
+        private AssetReference GetLocalLevelReference(int index)
+        {
+            List<AssetReference> references = LocalAddressableLevelReferences;
+            return index >= 0 && index < references.Count ? references[index] : null;
+        }
+
+        /// <summary>
+        /// Starts loading a local main level on demand (Addressables storage). The caller owns and must release the handle.
+        /// </summary>
+        public virtual bool TryLoadLocalLevelAsync(int index, out AsyncOperationHandle<TLevel> handle)
+        {
+            AssetReference reference = UsesAddressableLocalLevels ? GetLocalLevelReference(index) : null;
+            return TryLoadReference(reference, out handle);
+        }
+
+        /// <summary>
+        /// Starts loading a local option level on demand (Addressables storage). The caller owns and must release the handle.
+        /// </summary>
+        public virtual bool TryLoadLocalOptionLevelAsync(string optionLabel, int index, out AsyncOperationHandle<TLevel> handle)
+        {
+            AssetReference reference = UsesAddressableLocalLevels ? GetLocalOptionLevelReference(optionLabel, index) : null;
+            return TryLoadReference(reference, out handle);
+        }
+
+        /// <summary>
+        /// Async counterpart of GetLocalFallbackLevelData: the preferred option's local level first,
+        /// then the main local list wrapped over the requested index.
+        /// </summary>
+        public virtual bool TryLoadLocalFallbackLevelAsync(
+            int requestedIndex,
+            string preferredOption,
+            out AsyncOperationHandle<TLevel> handle,
+            out int localIndex,
+            out string sourceOption)
+        {
+            handle = default;
+            localIndex = -1;
+            sourceOption = MainLevelOption;
+            if (!UsesAddressableLocalLevels || requestedIndex < 0)
+                return false;
+
+            string option = NormalizeOptionLabel(preferredOption);
+            if (!string.Equals(option, MainLevelOption, StringComparison.OrdinalIgnoreCase) &&
+                IsConfiguredLevelOption(option) &&
+                TryLoadLocalOptionLevelAsync(option, requestedIndex, out handle))
+            {
+                localIndex = requestedIndex;
+                sourceOption = option;
+                return true;
+            }
+
+            int localCount = LocalLevelCount;
+            if (localCount <= 0)
+                return false;
+
+            int firstCandidate = requestedIndex % localCount;
+            for (int offset = 0; offset < localCount; offset++)
+            {
+                int candidateIndex = (firstCandidate + offset) % localCount;
+                if (TryLoadLocalLevelAsync(candidateIndex, out handle))
+                {
+                    localIndex = candidateIndex;
+                    sourceOption = MainLevelOption;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryLoadReference(AssetReference reference, out AsyncOperationHandle<TLevel> handle)
+        {
+            if (reference != null && reference.RuntimeKeyIsValid())
+            {
+                handle = UnityEngine.AddressableAssets.Addressables.LoadAssetAsync<TLevel>(reference.RuntimeKey);
+                return true;
+            }
+
+            handle = default;
+            return false;
         }
 
         public virtual TLevel GetLocalFallbackLevelData(int requestedIndex, out int localIndex)
