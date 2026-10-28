@@ -448,7 +448,7 @@ namespace Eternals.LevelManagement.Addressables
                     levelDataManager);
             }
 
-            levelDataManager.RecordLevelLoadSource(false, option);
+            levelDataManager.RecordLevelLoadSource(false, option, remoteFailure);
             onLoaded?.Invoke(localLevel, requestedIndex);
             ReleaseActiveAsset();
             return true;
@@ -495,7 +495,7 @@ namespace Eternals.LevelManagement.Addressables
                     levelDataManager);
             }
 
-            levelDataManager.RecordLevelLoadSource(false, sourceOption);
+            levelDataManager.RecordLevelLoadSource(false, sourceOption, remoteFailure);
             onLoaded?.Invoke(localLevel, requestedIndex);
             ReleaseActiveAsset();
             return true;

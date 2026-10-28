@@ -264,6 +264,12 @@ namespace Eternals.LevelManagement
         public string PriorityOption => priorityOption;
         public string CurrentLevelOption { get; private set; } = MainLevelOption;
         public string CurrentLevelSource { get; private set; } = "None";
+        public bool CurrentLevelFromAddressables { get; private set; }
+        /// <summary>Why the last load fell back to local data; empty when it did not fall back.</summary>
+        public string CurrentLevelFallbackReason { get; private set; } = string.Empty;
+        /// <summary>Remote catalog file name (<c>catalog_&lt;playerVersion&gt;</c>) that served the last Addressables load.</summary>
+        public string CurrentCatalogVersion { get; private set; } = string.Empty;
+        public string CurrentCatalogHash { get; private set; } = string.Empty;
         protected string PreparedLevelOption => preparedLevelOption;
         protected bool HasPreparedLevelOption => hasPreparedLevelOption;
 
@@ -384,11 +390,25 @@ namespace Eternals.LevelManagement
             }
         }
 
-        public void RecordLevelLoadSource(bool addressable, string optionLabel)
+        public void RecordLevelLoadSource(bool addressable, string optionLabel, string fallbackReason = null)
         {
             string option = NormalizeOptionLabel(optionLabel);
             CurrentLevelOption = option;
             CurrentLevelSource = (addressable ? "Addressable: " : "Local: ") + option;
+            CurrentLevelFromAddressables = addressable;
+            CurrentLevelFallbackReason = fallbackReason ?? string.Empty;
+
+            // Captured at load time: the catalog can be replaced mid-session, but this level keeps the content it was loaded with.
+            if (addressable && AddressableCatalogUpdater.TryGetActiveCatalog(out string version, out string hash))
+            {
+                CurrentCatalogVersion = version;
+                CurrentCatalogHash = hash;
+            }
+            else
+            {
+                CurrentCatalogVersion = string.Empty;
+                CurrentCatalogHash = string.Empty;
+            }
         }
 
         protected bool IsConfiguredLevelOption(string optionLabel)

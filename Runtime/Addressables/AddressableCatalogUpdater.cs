@@ -80,6 +80,32 @@ namespace Eternals.LevelManagement.Addressables
                 callbacks[i]?.Invoke();
         }
 
+        /// <summary>
+        /// Finds the active remote catalog so a loaded level can be attributed to the content version that served it.
+        /// <paramref name="version"/> is the catalog file name without extension (<c>catalog_&lt;playerVersion&gt;</c>),
+        /// <paramref name="hash"/> is the catalog content hash. Returns false when no remote catalog is loaded.
+        /// </summary>
+        public static bool TryGetActiveCatalog(out string version, out string hash)
+        {
+            version = null;
+            hash = null;
+
+            foreach (UnityEngine.AddressableAssets.ResourceLocators.IResourceLocator locator in
+                     UnityEngine.AddressableAssets.Addressables.ResourceLocators)
+            {
+                UnityEngine.AddressableAssets.ResourceLocatorInfo info =
+                    UnityEngine.AddressableAssets.Addressables.GetLocatorInfo(locator);
+                if (info == null || info.CatalogLocation == null || string.IsNullOrEmpty(info.LocalHash))
+                    continue;
+
+                hash = info.LocalHash;
+                version = System.IO.Path.GetFileNameWithoutExtension(info.CatalogLocation.InternalId);
+                return true;
+            }
+
+            return false;
+        }
+
         private static Runner EnsureRunner()
         {
             if (runner != null)

@@ -50,3 +50,7 @@ At runtime, attempt remote catalog discovery and remote asset loading first. If 
 5. Preserve old bundles while released clients may still reference them.
 
 `AddressableLevelRegistrationUtility` provides reusable Editor registration, validation, labels, dirty-state handling, and Undo support.
+
+## Level content version for analytics
+
+After each load, `LevelDataManagerBase` exposes where the level came from: `CurrentLevelFromAddressables`, `CurrentLevelFallbackReason` (non-empty when a remote load fell back to local data), `CurrentCatalogVersion` (`catalog_<playerVersion>`) and `CurrentCatalogHash`. Values are captured at load time, so a catalog update that lands mid-level does not change what the current level reports. To get a readable date in `CurrentCatalogVersion`, set the Addressables **Player Version Override** to a timestamp when publishing the remote catalog.
