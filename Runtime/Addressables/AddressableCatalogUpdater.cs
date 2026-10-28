@@ -107,6 +107,14 @@ namespace Eternals.LevelManagement.Addressables
                     ? dependencies[0].InternalId
                     : info.CatalogLocation.InternalId;
                 version = System.IO.Path.GetFileNameWithoutExtension(id);
+
+                var diagnostic = new System.Text.StringBuilder("[AddressableCatalogUpdater] Active catalog: locator=")
+                    .Append(locator.LocatorId)
+                    .Append(", location=").Append(info.CatalogLocation.InternalId)
+                    .Append(", hash=").Append(info.LocalHash);
+                for (int i = 0; dependencies != null && i < dependencies.Count; i++)
+                    diagnostic.Append(", dependency[").Append(i).Append("]=").Append(dependencies[i].InternalId);
+                Debug.Log(diagnostic.ToString());
                 return true;
             }
 
