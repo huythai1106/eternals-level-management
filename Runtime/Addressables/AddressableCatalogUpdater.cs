@@ -99,7 +99,14 @@ namespace Eternals.LevelManagement.Addressables
                     continue;
 
                 hash = info.LocalHash;
-                version = System.IO.Path.GetFileNameWithoutExtension(info.CatalogLocation.InternalId);
+
+                // The catalog location itself is the bundled "catalog.json"; the versioned name (catalog_<playerVersion>)
+                // only appears on its first dependency, the remote hash file.
+                var dependencies = info.CatalogLocation.Dependencies;
+                string id = dependencies != null && dependencies.Count > 0
+                    ? dependencies[0].InternalId
+                    : info.CatalogLocation.InternalId;
+                version = System.IO.Path.GetFileNameWithoutExtension(id);
                 return true;
             }
 
